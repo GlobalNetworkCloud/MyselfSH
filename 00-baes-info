@@ -1,0 +1,170 @@
+#!/bin/bash
+
+# ANSI escape codes for colors
+RED="\033[1;31m"
+GREEN="\033[1;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[1;34m"
+CYAN="\033[1;36m"
+RESET="\033[0m"
+
+# Check command existence
+check_command() {
+    if command -v "$1" &> /dev/null; then
+        echo -e "${CYAN}$1:${RESET} ${GREEN}已安装"
+        return 0
+    else
+        echo -e "${CYAN}$1:${RESET} ${RED}未安装"
+        return 1
+    fi
+}
+
+# Check service status
+check_service() {
+    local status=$(systemctl is-active "$1")
+    case "$status" in
+        "active")
+            echo -e "${CYAN}$1:${RESET} ${GREEN}$1已运行"
+            ;;
+        *)
+            echo -e "${CYAN}$1:${RESET} ${YELLOW}$1未运行"
+            ;;
+    esac
+}
+
+# Fetch primary network interface
+primary_iface=$(ip route get 1 | awk '{print $5; exit}')
+
+# Fetch system information
+read -r uname_info < <(uname -snrvm)
+
+# Extract details
+hostname=$(awk '{print $2}' <<< "$uname_info")
+kernel_version=$(awk '{print $3}' <<< "$uname_info")
+
+# Hostname processing
+if [[ $hostname == *prod* ]]; then
+    echo -e "${RED}生产环境:${RESET} $hostname"
+else
+    echo -e "${GREEN}主机名 (Hostname):${RESET} $hostname"
+fi
+
+# Kernel version processing
+if [[ $kernel_version == *xanmod* ]]; then
+    echo -e "${RED}xanmod内核:${RESET} $kernel_version"
+else
+    echo -e "${GREEN}内核版本 (Kernel Version):${RESET} $kernel_version"
+fi
+
+load=$(uptime | awk -F 'load average: ' '{print $2}' | cut -d, -f1)
+echo -e "${CYAN}1分钟负载:${RESET} $load"
+
+total_memory=$(free -m | awk '/Mem:/ {print $2}')
+used_memory=$(free -m | awk '/Mem:/ {print $3}')
+echo -e "${CYAN}内存使用情况:${RESET} ${used_memory}MB/${total_memory}MB"
+
+disk_usage=$(df -h | grep '/$' | awk '{print $5}')
+echo -e "${CYAN}磁盘使用情况:${RESET} $disk_usage"
+
+# 继续...
+
+# 检查 swap 使用情况
+swap_total=$(free -m | awk '/Swap:/ {print $2}')
+swap_used=$(free -m | awk '/Swap:/ {print $3}')
+if [[ $swap_total -eq 0 ]]; then
+    echo -e "${CYAN}Swap 使用情况:${RESET} 无swap分区或文件"
+else
+    echo -e "${CYAN}Swap 使用情况:${RESET} ${swap_used}MB/${swap_total}MB"
+fi
+
+# 获取CPU信息
+cpu_info=$(awk -F: '/^model name/ {print $2}' /proc/cpuinfo | uniq | sed 's/^[ \t]*//;s/[ \t]*$//')
+echo -e "${CYAN}CPU 信息:${RESET} $cpu_info"
+
+# 获取CPU核心数
+cpu_cores=$(nproc)
+echo -e "${CYAN}CPU 核心数:${RESET} $cpu_cores"
+
+# 获取网络速度
+rx_before=$(cat /sys/class/net/$primary_iface/statistics/rx_bytes)
+tx_before=$(cat /sys/class/net/$primary_iface/statistics/tx_bytes)
+sleep 1
+rx_after=$(cat /sys/class/net/$primary_iface/statistics/rx_bytes)
+tx_after=$(cat /sys/class/net/$primary_iface/statistics/tx_bytes)
+
+rx_rate=$((($rx_after-$rx_before)/1024))
+tx_rate=$((($tx_after-$tx_before)/1024))
+
+echo -e "${CYAN}下载速度 (1秒内):${RESET} $rx_rate KB/s"
+echo -e "${CYAN}上传速度 (1秒内):${RESET} $tx_rate KB/s"
+
+# 检查防火墙状态
+if check_command "firewalld"; then
+    firewall_status=$(systemctl is-active firewalld)
+    echo -e "${CYAN}Firewalld 状态:${RESET} $firewall_status"
+fi
+
+# 系统启动时间
+uptime_str=$(uptime -p)
+echo -e "${CYAN}系统运行时间:${RESET} $uptime_str"
+
+# 显示登录的用户
+logged_users=$(who | awk '{print $1}' | sort | uniq)
+if [[ -n $logged_users ]]; then
+    echo -e "${CYAN}已登录用户:${RESET}\n$logged_users"
+else
+    echo -e "${CYAN}已登录用户:${RESET} None"
+fi
+
+# Check tun support
+[[ -c /dev/net/tun ]] && echo -e "${CYAN}tun:${RESET} ${GREEN}支持" || echo -e "${CYAN}tun:${RESET} ${RED}不支持"
+
+# Fetch Linux distribution
+[[ -f /etc/os-release ]] && . /etc/os-release
+echo -e "${CYAN}Linux 发行版本:${RESET} ${PRETTY_NAME:-Unknown}"
+
+# Remaining system information
+Gateway=$(ip route | grep default | awk '{print $3}')
+echo -e "${CYAN}默认网关:${RESET} $Gateway"
+
+# 获取所有的IPv4和IPv6地址，但排除lo网卡
+ipv4_ips=$(ip -4 addr show | grep -v " lo" | grep 'inet' | awk '{print "  IPv4 address for " $NF ": " $2}')
+ipv6_ips=$(ip -6 addr show | grep -v " lo" | grep 'inet6' | awk '{print "  IPv6 address for " $NF ": " $2}')
+
+echo -e "${CYAN}IPv4 地址:${RESET}"
+echo "$ipv4_ips"
+echo -e "${CYAN}IPv6 地址:${RESET}"
+echo "$ipv6_ips"
+
+# Fetch and display QDisc info
+current_qdisc=$(tc qdisc show dev "$primary_iface" | awk 'NR==1{print $2}')
+echo -e "${CYAN}当前流控模块:${RESET} $current_qdisc"
+
+# Check BBR support and display
+if [[ -e /proc/sys/net/ipv4/tcp_congestion_control ]]; then
+    current_control=$(< /proc/sys/net/ipv4/tcp_congestion_control)
+    available_controls=$(< /proc/sys/net/ipv4/tcp_available_congestion_control)
+    [[ $available_controls == *bbr* ]] && echo -e "${CYAN}BBR支持:${RESET} ${GREEN}支持 (Current: $current_control)" || echo -e "${CYAN}BBR支持:${RESET} ${RED}不支持"
+else
+    echo -e "${CYAN}BBR:${RESET} ${RED}不支持"
+fi
+
+# Display BBR version
+if [[ -e /sys/module/tcp_bbr/version ]]; then
+    bbr_version=$(< /sys/module/tcp_bbr/version)
+    echo -e "${CYAN}BBR版本:${RESET} $bbr_version"
+else
+    echo -e "${CYAN}BBR版本:${RESET} 未加载BBR模块"
+fi
+
+# Check command existence and special cases
+for cmd in v2bx Xrayr warp warp-cli; do
+    check_command "$cmd" && [[ $cmd == "warp-cli" && $(pgrep -x "warp-svc") ]] && echo -e "${CYAN}warp-cli:${RESET} ${GREEN}warp-cli已运行"
+done
+
+# Check service file and status for V2bX
+if [[ -f /etc/systemd/system/V2bX.service ]]; then
+    check_service "V2bX"
+else
+    echo -e "${CYAN}V2bX:${RESET} ${RED}V2bX未安装"
+fi
